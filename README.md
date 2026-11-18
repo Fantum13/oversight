@@ -2,7 +2,7 @@
 
 **Oversight** is a browser-based **ERP** (Enterprise Resource Planning: one system that runs sales, inventory, production, warehouse, and shipping together) built around a **WMS** (Warehouse Management System: software that directs where stock lives and how it moves).
 
-**Version:** 2.3 (concept-complete draft, pre-prototype)
+**Version:** 2.4 (concept-complete draft, pre-prototype)
 
 **Product model:** Oversight is sold as software to **warehouse operators**: the company that installs and runs it at its own facility, on its own network. One installation serves one operator. Inside it, the operator may store and ship goods for several **owners** (companies whose goods are in the warehouse; the operator itself may be the only owner). Each owner's stock, orders, and data are kept strictly separate. Business policies such as shortage handling, reservation timeouts, and audit requirements are **operator-defined settings** chosen through dropdowns and data-entry fields, not fixed in code, and many can differ per owner. See [Section 12](#12-configuration-settings-operator-defined-options).
 
@@ -105,6 +105,9 @@ Oversight manages the full cycle of an order and the full cycle of the materials
 | **Short Ship** | Shipping less than ordered |
 | **Shipment / Load Plan** | The record of what is going out on one truck: weight, cube, pallet count |
 | **Cube** | Volume of freight |
+| **Net Weight** | The weight of the product alone, with no packaging or pallet |
+| **Tare Weight** | The weight of the packaging and carrier only: the pallet, stretch wrap, corner boards, and slip sheets. It is item information, because it depends on how an item is packed. |
+| **Gross Weight** | Net weight plus tare weight: the full weight of what is being moved. It is shipping information: it goes on the shipment, the BOL, and the truck capacity check. (The empty weight of the truck itself is a different "tare" that Oversight does not store.) |
 | **Freight Tender / Carrier Booking** | Requesting a carrier to haul a shipment |
 | **Dock Appointment** | A scheduled time and door for a truck to load |
 | **Carrier Check-In** | Recording that a truck has arrived |
@@ -211,7 +214,8 @@ These are the master and transaction records the whole system depends on. Define
 | `base_uom` | Smallest counted unit (each, lb, etc.) |
 | `units_per_case` | Base units in a case |
 | `cases_per_pallet` | Cases on a full pallet |
-| `unit_weight`, `case_weight`, `pallet_weight` | Weight of each level (with unit, such as lb) |
+| `unit_weight` | **Net** weight of one unit (product only), entered. Unit of measure is set by `cfg.weight_unit`. |
+| `pallet_tare_weight` | **Tare** weight of the pallet and its packing materials (pallet, stretch wrap, corner boards, slip sheets), entered. Zero is allowed (floor-loaded product), but the field must be filled in deliberately. See `ITM-01`. |
 | `case_length`, `case_width`, `case_height` | Dimensions |
 | `min_order_qty`, `order_multiple` | Sales rules (case-only, etc.) |
 | `is_lot_controlled` | Yes/No: must lot number be tracked? |
@@ -224,7 +228,19 @@ These are the master and transaction records the whole system depends on. Define
 | `lead_time_days` | Raw materials: typical vendor delivery time |
 | `default_location_zone` | Preferred slotting zone |
 
-**Rule `ITM-01` (Block):** An item with missing weight, dimensions, or units-per-pallet cannot be sold or produced. This prevents zero-weight shipments.
+**Derived fields (calculated by the system, never typed in).** Basic data is entered once; everything that can be worked out from it is calculated, so two stored numbers can never disagree.
+
+| Derived field | Calculation | Used for |
+|---|---|---|
+| `case_weight` | `unit_weight × units_per_case` (net weight of one case) | Picking and receiving checks |
+| `pallet_net_weight` | `case_weight × cases_per_pallet` (net weight of a full pallet) | Estimates |
+| `pallet_gross_weight` | `pallet_net_weight + pallet_tare_weight` (estimated gross weight of a full pallet) | Load planning; the starting point for the shipment's gross weight |
+
+These are recalculated whenever a basic value they depend on changes. Whether they are stored or calculated each time they are read is a database design decision, made in the data-model step.
+
+**Rule `ITM-01` (Block):** An item cannot be sold or produced if any required basic field is missing: `unit_weight`, `units_per_case`, `cases_per_pallet`, `case_length`, `case_width`, `case_height`, or `pallet_tare_weight`. A value of zero counts as missing for every required field **except** `pallet_tare_weight`, where zero is legitimate; for that field only, "not entered" is missing. The result names every field that failed, so the interface can show the message beside that field. This prevents zero-weight shipments.
+
+**Rule `ITM-02` (Block):** Derived fields cannot be edited directly. Change the basic data they come from instead.
 
 ### 5.2 Customer (`customer`)
 
@@ -253,7 +269,7 @@ Related: `ship_to_address` (multiple per customer): `ship_to_id`, `customer_id`,
 | `zone_id` (FK), `aisle`, `bay`, `level`, `slot` | Zone and physical address parts. Ownership comes from the zone and is never stored on the location. |
 | `location_type` | `PALLET_RACK`, `FLOOR`, `CASE_PICK`, `STAGING`, `DOCK_DOOR`, `WIP`, `QUARANTINE` |
 | `pick_sequence_number` | Order of this location along the pick path |
-| `max_weight`, `max_height`, `max_pallets` | Capacity limits |
+| `max_weight`, `max_height`, `max_pallets` | Capacity limits (`max_weight` is checked against gross weight) |
 | `allowed_storage_class` | Compatibility with items |
 | `status` | `OPEN`, `BLOCKED`, `COUNT_IN_PROGRESS`, `DAMAGED` |
 | `check_digit` | Short code the user scans/enters to prove they are at the right spot |
@@ -334,8 +350,8 @@ One row per quantity reserved from a specific inventory row for a specific order
 | `shipment_id` (PK) | Unique ID |
 | `owner_id` (FK) | The owner whose order is on this shipment (one owner per shipment) |
 | `so_id` (FK) | Order (one shipment may later cover multiple orders) |
-| `planned_weight`, `planned_cube`, `planned_pallet_count`, `planned_carton_count` | Calculated at release |
-| `actual_weight`, `actual_pallet_count` | Recorded at load |
+| `planned_gross_weight`, `planned_cube`, `planned_pallet_count`, `planned_carton_count` | Calculated at release. `planned_gross_weight` = net weight of the product plus the tare weight of every pallet (Section 5.1). |
+| `actual_gross_weight`, `actual_pallet_count` | Recorded at load. `actual_gross_weight` is the sum of scanned pallets' gross weights, or a scale reading where the dock has a scale. |
 | `carrier_id`, `carrier_service` | Carrier |
 | `dock_appointment_start`, `dock_door` | Schedule |
 | `truck_number` / `trailer_number` | Assigned vehicle |
@@ -344,7 +360,7 @@ One row per quantity reserved from a specific inventory row for a specific order
 | `status` | `PLANNED`, `BOOKED`, `CHECKED_IN`, `LOADING`, `LOADED`, `SHIPPED` |
 | `checked_in_at`, `loaded_at`, `departed_at` | Timestamps |
 
-Related: `shipment_pallet` (`shipment_id`, `lpn`, `scanned_at`, `scanned_by`).
+Related: `shipment_pallet` (`shipment_id`, `lpn`, `gross_weight`, `scanned_at`, `scanned_by`). `shipment_pallet.gross_weight` = the net weight of the stock on that LPN plus its `pallet_tare_weight`, counted once per pallet.
 
 ### 5.11 Vendor and Purchasing
 
@@ -495,12 +511,12 @@ The system chooses stock using the item's `rotation_rule` (**FIFO** by `lot.prod
 
 Weights, dimensions, and pallet counts are calculated from the Item Master and attached to the `shipment` so Logistics can book transportation.
 
-**Writes:** `shipment.planned_weight`, `planned_cube`, `planned_pallet_count`, `planned_carton_count`.
+**Writes:** `shipment.planned_gross_weight`, `planned_cube`, `planned_pallet_count`, `planned_carton_count`.
 
 | Rule | Type | Check |
 |---|---|---|
-| `LOG-01` | Block | Plan generation fails (with the missing field named) if item weight, dimensions, or units-per-pallet is missing. No zeros. |
-| `LOG-02` | Block | `planned_weight` and `planned_pallet_count` ≤ maximum capacity for the booked equipment type and legal road limits. |
+| `LOG-01` | Block | Plan generation fails (with the missing field named) if an item's weight, dimensions, units-per-pallet, or tare weight (`ITM-01`) is missing. No silent zeros: a missing value is never treated as 0. |
+| `LOG-02` | Block | `planned_gross_weight` and `planned_pallet_count` ≤ maximum capacity for the booked equipment type and legal road limits. Compare **gross** weight, because pallets and wrap are carried too. |
 | `LOG-03` | Block | Hazmat and `storage_class` (for example cold) must be compatible with the carrier and trailer type. |
 
 ### Stage 5. Pick Task Assignment and Picking
@@ -553,7 +569,7 @@ Weights, dimensions, and pallet counts are calculated from the Item Master and a
 
 **What happens:** The order passes to the dock team. The **Dock Loader** enters the `truck_number`, and Oversight matches it to the `truck_number` previously assigned to the order. Once it matches, loading begins. Each pallet or carton is scanned onto the truck. The loader records the **Seal Number** and signs off.
 
-**Writes:** `shipment_pallet`, `shipment.actual_weight`, `actual_pallet_count`, `seal_number`, `loaded_at`, `status`; `inventory.status` (`LOADED`); `sales_order.status` (`LOADING` then `LOADED`).
+**Writes:** `shipment_pallet`, `shipment.actual_gross_weight`, `actual_pallet_count`, `seal_number`, `loaded_at`, `status`; `inventory.status` (`LOADED`); `sales_order.status` (`LOADING` then `LOADED`).
 
 | Rule | Type | Check |
 |---|---|---|
@@ -675,7 +691,7 @@ Weights, dimensions, and pallet counts are calculated from the Item Master and a
 
 | Rule | Type | Check |
 |---|---|---|
-| `PUT-01` | Block | The destination location must be `OPEN`, pass capacity checks (`max_weight`, `max_height`, `max_pallets`), and lie in a zone assigned to the inventory's owner (or a shared zone), per `OWN-03`. |
+| `PUT-01` | Block | The destination location must be `OPEN`, pass capacity checks (`max_weight` compared with the pallet's gross weight, `max_height`, `max_pallets`), and lie in a zone assigned to the inventory's owner (or a shared zone), per `OWN-03`. |
 | `PUT-02` | Block | The location's `allowed_storage_class` must match the item. |
 | `PUT-03` | Reroute | **No location available in the owner's zones:** direct to an overflow location in the same owner's zones (or a shared overflow area, if the operator has designated one) and raise an `exception` to the Warehouse Supervisor. Never place stock in another owner's zone. |
 | `PUT-04` | Block | Stock is not `AVAILABLE` (not counted in ATP) until the putaway scan, including the check digit, is confirmed. |
@@ -730,7 +746,8 @@ A warehouse that stores goods for owners normally charges them for storage, rece
 | **Scanning** | All scans validate server-side against the expected record. A scan never writes to the database without validation. |
 | **Time and duplicates** | Soft reservations, sessions, and tasks have timeouts; all scan endpoints are idempotent (a double-scan does not double-count). |
 | **Browser operation** | Warehouse screens must work on handheld scanners and tablets; scan screens are single-purpose, with large touch targets and audible/visual error feedback. |
-| **Data integrity** | Item Master completeness (`ITM-01`) is enforced before any item can appear on an order or Work Order. |
+| **Data integrity** | Item Master completeness (`ITM-01`) is enforced before any item can appear on an order or Work Order. Derived values are calculated from basic data and never edited directly (`ITM-02`). |
+| **Server-side enforcement** | Every rule in this document is enforced by the server before data is saved. Messages shown beside fields on a screen are a courtesy that report what the server would enforce anyway. The browser is never trusted, because anyone can bypass a screen by sending a request directly. Validation functions return the list of failed fields (empty means passed), so the screen can show a message beside each one, and the server can refuse the action. |
 | **Owner separation** | Every query on owner-specific data is filtered by `owner_id` (or the user's allowed owners), enforced on the server so no screen, report, or scan can cross owners. See Section 10.6. |
 | **Multi-site** | Controlled by the `MULTI_SITE` module (Section 12.6). `site_id` is stored on zone, inventory, orders, and settings from the start, so the operator can add warehouses without restructuring data. |
 
@@ -890,7 +907,7 @@ Each setting declares which levels it may be set at (the `allowed_scopes` field 
 | `invoice_trigger` | Dropdown | **`AT_SHIP_CONFIRM`**, `MANUAL`, `NONE` (accounting handled elsewhere) | W, O | `SHP-04`, `INV-01` |
 | `weight_unit` / `dimension_unit` | Dropdown | `LB` or `KG` / `IN` or `CM` (**LB / IN**) | W | `LOG-01` |
 
-Capacity limits are master data, not settings. Each `equipment_type` (53-foot trailer, box truck, and so on) has `max_weight`, `max_cube`, and `max_pallets`, entered by the customer and checked by `LOG-02`.
+Capacity limits are master data, not settings. Each `equipment_type` (53-foot trailer, box truck, and so on) has `max_gross_weight`, `max_cube`, and `max_pallets`, entered by the operator and checked by `LOG-02`.
 
 #### Purchasing and Replenishment (`module = PURCHASING`)
 
@@ -1108,7 +1125,7 @@ Operator-wide settings (the same for both owners): units `LB` / `IN`, `enforce_p
 **Seed data** (enough to run every rule at least once):
 
 - **Zones:** storage zones A1 to A3 assigned to Owner A; B1 to B3 assigned to Owner B; shared zones for receiving, staging, 3 dock doors, and quarantine.
-- **Items (about 12 per owner):** finished goods covering FIFO ambient, FEFO with expiration, cold storage, and hazmat; raw materials for two BOMs (Owner B); one item with missing weight data to trigger `ITM-01`. The same SKU (for example `1001`) exists under both owners.
+- **Items (about 12 per owner):** finished goods covering FIFO ambient, FEFO with expiration, cold storage, and hazmat; raw materials for two BOMs (Owner B); one item with missing weight data to trigger `ITM-01`; one floor-loaded item with `pallet_tare_weight` of 0 (valid), and one with `pallet_tare_weight` not entered (invalid). The same SKU (for example `1001`) exists under both owners.
 - **Customer accounts (about 5 per owner):** good standing on Net Terms; near credit limit; on credit hold; prepaid card; one requiring 30 days of remaining shelf life; one that disallows lot mixing.
 - **Locations (about 20 per owner zone group):** pallet rack, case pick, and overflow, plus one blocked and one under count.
 - **Vendors (3, Owner B only):** with primary, secondary, and tertiary priority on one material, and a second material where all three are out of stock (`PUR-05`).
@@ -1159,6 +1176,9 @@ Nothing below blocks development. Each is an assumption that a real operator may
 | 11 | What their agreements with owners allow owners to see in the portal |
 | 12 | How owners are billed today, and which warehouse activities they charge for (decides the future billing module) |
 | 13 | How often zones are reassigned between owners (for example when an owner moves out) |
+| 14 | Whether carton and inner packaging weight must also be tracked (a case tare), or whether the pallet tare is accurate enough for their carriers |
+| 15 | How tare is counted on mixed pallets (several items on one LPN), where `ITM-01` currently counts a single tare per pallet |
+| 16 | Whether any dock has a scale, so `actual_gross_weight` can be measured instead of calculated |
 
 ### 13.7 Recommended Build Order
 
@@ -1182,5 +1202,6 @@ The configuration engine goes first, because every rule in this README reads a s
 | 2.1 | Operator-configurable policy: settings catalog, configuration hierarchy, modules, rules that are never configurable. |
 | 2.2 | Development baseline: fixed versus definable settings (Tier A / Tier B), development rules, test fixtures, build order. |
 | 2.3 | Owner model for shared (3PL-style) warehouses: operator and owner roles, owner-assigned zones, shared operational areas, owner separation rules, view-only Owner Portal, billing events, warehouse-wide versus per-owner settings. |
+| 2.4 | Weights split into net, tare, and gross: tare weight (`pallet_tare_weight`) is item information; gross weight is shipping information (`planned_gross_weight`, `actual_gross_weight`, `shipment_pallet.gross_weight`). Derived values are calculated, not entered (`ITM-02`). Validation reports failing fields (`ITM-01`). Server-side enforcement rule added. |
 
 **Maintenance rule:** whenever a design decision changes, this README is updated in the same step and the change is added to this log.
